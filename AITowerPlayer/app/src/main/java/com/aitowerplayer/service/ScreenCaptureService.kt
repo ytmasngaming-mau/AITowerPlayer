@@ -1,0 +1,439 @@
+package com.aitowerplayer.service
+
+import android.app.Activity
+import android.app.Notification
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.Image
+import android.media.ImageReader
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.IBinder
+import android.os.Looper
+import android.util.DisplayMetrics
+import android.view.WindowManager
+import androidx.core.app.NotificationCompat
+import com.aitowerplayer.AITowerApp
+import com.aitowerplayer.R
+import com.aitowerplayer.model.GameState
+import com.aitowerplayer.ui.MainActivity
+import com.aitowerplayer.util.ConfigManager
+import com.aitowerplayer.util.LogManager
+import com.aitowerplayer.vision.ScreenAnalyzer
+import kotlinx.coroutines.*
+
+/**
+ * Foreground service that captures the screen via MediaProjection
+ * and runs the AI state machine.
+ */
+class ScreenCaptureService : Service() {
+
+    companion object {
+        const val ACTION_START = "com.aitowerplayer.START"
+        const val ACTION_STOP = "com.aitowerplayer.STOP"
+        const val EXTRA_RESULT_CODE = "result_code"
+        const val EXTRA_DATA = "data"
+
+        @Volatile
+        var isRunning = false
+            private set
+
+        @Volatile
+        var currentState: GameState = GameState.IDLE
+            private set
+
+        var stateListener: ((GameState, String) -> Unit)? = null
+    }
+
+    private var mediaProjection: MediaProjection? = null
+    private var virtualDisplay: VirtualDisplay? = null
+    private var imageReader: ImageReader? = null
+    private var captureThread: HandlerThread? = null
+    private var captureHandler: Handler? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private var screenWidth = 0
+    private var screenHeight = 0
+    private var screenDensity = 0
+
+    private lateinit var analyzer: ScreenAnalyzer
+    private var aiJob: Job? = null
+    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+
+    private var isHoldingTouch = false
+    private var lastTouchX = 0f
+    private var lastTouchY = 0f
+    private var holdStartTime = 0L
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        analyzer = ScreenAnalyzer(ConfigManager.config)
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val metrics = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        wm.defaultDisplay.getRealMetrics(metrics)
+        screenWidth = metrics.widthPixels
+        screenHeight = metrics.heightPixels
+        screenDensity = metrics.densityDpi
+        LogManager.log("ScreenCaptureService dibuat. Resolusi: ${screenWidth}x${screenHeight}")
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_START -> {
+                val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
+                val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(EXTRA_DATA, Intent::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(EXTRA_DATA)
+                }
+                if (data != null && resultCode == Activity.RESULT_OK) {
+                    startCapture(resultCode, data)
+                } else {
+                    LogManager.log("Gagal: data MediaProjection tidak valid.")
+                    stopSelf()
+                }
+            }
+            ACTION_STOP -> {
+                stopAi()
+                stopSelf()
+            }
+        }
+        return START_STICKY
+    }
+
+    private fun startCapture(resultCode: Int, data: Intent) {
+        startForegroundNotification()
+        val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        mediaProjection = mpm.getMediaProjection(resultCode, data)
+        mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() {
+                LogManager.log("MediaProjection dihentikan oleh sistem.")
+                stopAi()
+                stopSelf()
+            }
+        }, mainHandler)
+
+        captureThread = HandlerThread("CaptureThread").also { it.start() }
+        captureHandler = Handler(captureThread!!.looper)
+
+        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+        virtualDisplay = mediaProjection?.createVirtualDisplay(
+            "AITowerCapture",
+            screenWidth, screenHeight, screenDensity,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            imageReader!!.surface, null, captureHandler
+        )
+
+        isRunning = true
+        setState(GameState.STARTING, "Memulai AI…")
+        LogManager.log("Screen capture aktif. Memulai AI loop.")
+        startAiLoop()
+    }
+
+    private fun startForegroundNotification() {
+        val pi = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val stopPi = PendingIntent.getService(
+            this, 1,
+            Intent(this, ScreenCaptureService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification: Notification = NotificationCompat.Builder(this, AITowerApp.CHANNEL_ID)
+            .setContentTitle("AI Tower Player")
+            .setContentText(getString(R.string.notification_running))
+            .setSmallIcon(R.drawable.ic_logo)
+            .setContentIntent(pi)
+            .addAction(R.drawable.ic_stop, "STOP", stopPi)
+            .setOngoing(true)
+            .build()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                1001, notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            )
+        } else {
+            startForeground(1001, notification)
+        }
+    }
+
+    private fun startAiLoop() {
+        aiJob?.cancel()
+        aiJob = scope.launch {
+            val config = ConfigManager.config
+            analyzer.updateConfig(config)
+            val frameInterval = (1000L / config.analysisFps.coerceIn(5, 30))
+
+            // Initial delay to let game settle
+            delay(800)
+            setState(GameState.GAMEPLAY, "Gameplay dimulai")
+
+            while (isActive && isRunning) {
+                try {
+                    val bitmap = captureFrame()
+                    if (bitmap != null) {
+                        processFrame(bitmap)
+                        bitmap.recycle()
+                    }
+                } catch (e: Exception) {
+                    LogManager.log("Error frame: ${e.message}")
+                }
+                delay(frameInterval)
+            }
+        }
+    }
+
+    private fun captureFrame(): Bitmap? {
+        val image: Image = imageReader?.acquireLatestImage() ?: return null
+        return try {
+            val plane = image.planes[0]
+            val buffer = plane.buffer
+            val pixelStride = plane.pixelStride
+            val rowStride = plane.rowStride
+            val rowPadding = rowStride - pixelStride * screenWidth
+
+            val bitmap = Bitmap.createBitmap(
+                screenWidth + rowPadding / pixelStride,
+                screenHeight,
+                Bitmap.Config.ARGB_8888
+            )
+            bitmap.copyPixelsFromBuffer(buffer)
+            if (rowPadding == 0) {
+                bitmap
+            } else {
+                val cropped = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
+                bitmap.recycle()
+                cropped
+            }
+        } catch (e: Exception) {
+            null
+        } finally {
+            image.close()
+        }
+    }
+
+    private suspend fun processFrame(bitmap: Bitmap) {
+        val config = ConfigManager.config
+        val result = analyzer.analyze(bitmap)
+        val acc = TowerAccessibilityService.instance
+
+        when (currentState) {
+            GameState.GAMEPLAY, GameState.HOLDING, GameState.RELEASING -> {
+                // Check win first
+                if (result.isWinScreen && config.autoLevelEnabled) {
+                    releaseTouch()
+                    setState(GameState.WIN_DETECTED, "TOWER SMASHED terdeteksi!")
+                    ConfigManager.incrementWin()
+                    delay(config.animationWaitMs)
+                    handleWin()
+                    return
+                }
+                if (result.isPopup && config.autoLevelEnabled) {
+                    releaseTouch()
+                    setState(GameState.POPUP_DETECTED, "Popup ROYAL DECREE terdeteksi")
+                    delay(600)
+                    handlePopup()
+                    return
+                }
+
+                // Danger / safe logic
+                if (result.isDanger) {
+                    if (isHoldingTouch) {
+                        releaseTouch()
+                        setState(GameState.RELEASING, "Bahaya! Lepas sentuhan (black=${"%.0f".format(result.blackRatio * 100)}%)")
+                    }
+                } else {
+                    // Safe zone – hold
+                    if (!isHoldingTouch && (result.isGameplay || !result.isLoading)) {
+                        startTouch()
+                        setState(GameState.HOLDING, "Area aman – tahan (black=${"%.0f".format(result.blackRatio * 100)}%)")
+                    }
+                    // Safety: max hold duration
+                    if (isHoldingTouch && System.currentTimeMillis() - holdStartTime > config.maxHoldMs) {
+                        releaseTouch()
+                        LogManager.log("Max hold tercapai, lepas otomatis.")
+                    }
+                }
+            }
+
+            GameState.WIN_DETECTED, GameState.WAITING_ANIMATION -> {
+                // already handled in delay path
+            }
+
+            GameState.CLICKING_LEVEL -> {
+                // wait for verification
+            }
+
+            GameState.POPUP_DETECTED, GameState.CLICKING_SMASH -> {
+                // handled in dedicated methods
+            }
+
+            GameState.LOADING -> {
+                if (result.isGameplay && !result.isLoading) {
+                    setState(GameState.GAMEPLAY, "Kembali ke gameplay")
+                }
+            }
+
+            else -> {}
+        }
+    }
+
+    private fun startTouch() {
+        val acc = TowerAccessibilityService.instance ?: run {
+            LogManager.log("Accessibility tidak aktif!")
+            return
+        }
+        val config = ConfigManager.config
+        lastTouchX = screenWidth * (config.touchXPercent / 100f)
+        lastTouchY = screenHeight * (config.touchYPercent / 100f)
+        acc.startHold(lastTouchX, lastTouchY)
+        isHoldingTouch = true
+        holdStartTime = System.currentTimeMillis()
+    }
+
+    private fun releaseTouch() {
+        if (!isHoldingTouch) return
+        TowerAccessibilityService.instance?.releaseHold()
+        isHoldingTouch = false
+    }
+
+    private suspend fun handleWin() {
+        setState(GameState.CLICKING_LEVEL, "Menekan tombol Level…")
+        val tasks = ConfigManager.tasks
+            .filter { it.enabled && it.trigger == "AFTER_WIN" }
+            .sortedBy { it.order }
+
+        if (tasks.isNotEmpty()) {
+            for (task in tasks) {
+                delay(task.delayMs)
+                val (px, py) = resolveTaskPoint(task)
+                performTap(px, py)
+                LogManager.log("Task [${task.name}] diklik di (${px.toInt()},${py.toInt()}) percent=${task.usePercent}")
+            }
+        } else {
+            // Default sesuai screenshot: tombol Level di ~78% tinggi layar
+            delay(1000)
+            performTap(screenWidth / 2f, screenHeight * 0.78f)
+        }
+
+        // Wait and check for popup
+        delay(1500)
+        setState(GameState.LOADING, "Menunggu popup / level baru…")
+        // Give a few frames for popup detection in next loop iterations
+        var waited = 0
+        while (waited < 4000 && isRunning) {
+            delay(300)
+            waited += 300
+            val bmp = captureFrame()
+            if (bmp != null) {
+                val r = analyzer.analyze(bmp)
+                bmp.recycle()
+                if (r.isPopup) {
+                    setState(GameState.POPUP_DETECTED, "Popup terdeteksi setelah Level")
+                    delay(500)
+                    handlePopup()
+                    return
+                }
+                if (r.isGameplay) {
+                    setState(GameState.GAMEPLAY, "Level baru dimulai")
+                    return
+                }
+            }
+        }
+        // Fallback: assume gameplay
+        setState(GameState.GAMEPLAY, "Lanjut gameplay (timeout)")
+    }
+
+    private suspend fun handlePopup() {
+        setState(GameState.CLICKING_SMASH, "Menekan SMASH!")
+        val tasks = ConfigManager.tasks
+            .filter { it.enabled && it.trigger == "AFTER_POPUP" }
+            .sortedBy { it.order }
+
+        if (tasks.isNotEmpty()) {
+            for (task in tasks) {
+                delay(task.delayMs)
+                val (px, py) = resolveTaskPoint(task)
+                performTap(px, py)
+                LogManager.log("Task [${task.name}] diklik di (${px.toInt()},${py.toInt()}) percent=${task.usePercent}")
+            }
+        } else {
+            // Default sesuai screenshot: SMASH di tengah popup ~52% tinggi
+            delay(600)
+            performTap(screenWidth / 2f, screenHeight * 0.52f)
+        }
+
+        delay(1200)
+        setState(GameState.GAMEPLAY, "Kembali bermain setelah SMASH")
+    }
+
+    /**
+     * Ubah task X/Y menjadi pixel.
+     * Jika usePercent=true → x,y = 0..100 persen layar.
+     * Jika usePercent=false → x,y = pixel absolut.
+     */
+    private fun resolveTaskPoint(task: com.aitowerplayer.model.TaskItem): Pair<Float, Float> {
+        return if (task.usePercent) {
+            val px = screenWidth * (task.x.coerceIn(0, 100) / 100f)
+            val py = screenHeight * (task.y.coerceIn(0, 100) / 100f)
+            px to py
+        } else {
+            task.x.toFloat() to task.y.toFloat()
+        }
+    }
+
+    private fun performTap(x: Float, y: Float) {
+        val acc = TowerAccessibilityService.instance
+        if (acc == null) {
+            LogManager.log("Tidak bisa tap: Accessibility off")
+            return
+        }
+        acc.tap(x, y)
+    }
+
+    private fun setState(state: GameState, msg: String) {
+        currentState = state
+        LogManager.log("[$state] $msg")
+        mainHandler.post {
+            stateListener?.invoke(state, msg)
+        }
+    }
+
+    private fun stopAi() {
+        isRunning = false
+        releaseTouch()
+        aiJob?.cancel()
+        aiJob = null
+        setState(GameState.STOPPED, "AI dihentikan")
+        LogManager.log("AI dihentikan sepenuhnya.")
+    }
+
+    override fun onDestroy() {
+        stopAi()
+        virtualDisplay?.release()
+        imageReader?.close()
+        mediaProjection?.stop()
+        captureThread?.quitSafely()
+        scope.cancel()
+        isRunning = false
+        currentState = GameState.IDLE
+        super.onDestroy()
+    }
+}
