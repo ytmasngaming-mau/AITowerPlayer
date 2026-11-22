@@ -21,15 +21,45 @@ class ScreenAnalyzer(private var config: AppConfig) {
         config = c
     }
 
-    data class AnalysisResult(
-        val isDanger: Boolean,
-        val blackRatio: Float,
-        val isWinScreen: Boolean,
-        val isPopup: Boolean,
-        val isGameplay: Boolean,
-        val isLoading: Boolean,
-        val dominantHue: Float = 0f
-    )
+    companion object {
+        // Area bahaya = kolom tengah saja (tepat di bawah bola), bukan seluruh lebar tower
+        private const val CENTER_START = 0.38f
+        private const val CENTER_END = 0.62f
+
+        // Mode api / boost: seluruh tower berubah warna emas.
+        // Dari rekaman: normal 0-10% emas, mode api 60-78% emas.
+        private const val FIRE_GOLD_RATIO = 0.45f
+    }
+
+    /**
+     * Mode api / boost: tower berubah jadi emas -> blok hitam boleh dihancurkan.
+     */
+    fun isFireMode(bitmap: Bitmap): Boolean {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w < 10 || h < 10) return false
+        val xs = (w * 0.25f).toInt()
+        val xe = (w * 0.75f).toInt()
+        val ys = (h * 0.35f).toInt()
+        val ye = (h * 0.75f).toInt()
+        var gold = 0
+        var total = 0
+        var y = ys
+        while (y < ye) {
+            var x = xs
+            while (x < xe) {
+                val p = bitmap.getPixel(x, y)
+                val r = Color.red(p)
+                val g = Color.green(p)
+                val b = Color.blue(p)
+                if (r > 200 && g > 130 && b < 120 && (r - b) > 100) gold++
+                total++
+                x += 8
+            }
+            y += 8
+        }
+        return total > 0 && (gold.toFloat() / total) >= FIRE_GOLD_RATIO
+    }
 
     fun analyze(bitmap: Bitmap): AnalysisResult {
         val w = bitmap.width
@@ -45,8 +75,8 @@ class ScreenAnalyzer(private var config: AppConfig) {
         val yEnd = (bandY + bandH / 2).coerceAtMost(h - 1)
 
         // Sample center horizontal region (ignore edges / UI chrome)
-        val xStart = (w * 0.15f).toInt()
-        val xEnd = (w * 0.85f).toInt()
+        val xStart = (w * CENTER_START).toInt()
+        val xEnd = (w * CENTER_END).toInt()
         val stepX = 4
         val stepY = 3
 
@@ -78,7 +108,32 @@ class ScreenAnalyzer(private var config: AppConfig) {
         }
 
         val blackRatio = if (total > 0) blackCount.toFloat() / total else 0f
-        val isDanger = blackRatio >= (config.pixelThresholdPercent / 100f)
+        val fireMode = isFireMode(bitmap)
+        val isDanger = !fireMode && blackRatio >= (config.pixelThresholdPercent / 100f)
+
+        // Lookahead: lapisan berikutnya (sedikit di bawah garis deteksi), kolom tengah saja
+        val aheadCenterY = (bandY + (h * 0.03f).toInt()).coerceIn(0, h - 1)
+        val aheadStart = (aheadCenterY - bandH / 2).coerceAtLeast(0)
+        val aheadEnd = (aheadCenterY + bandH / 2).coerceAtMost(h - 1)
+        var aheadBlack = 0
+        var aheadTotal = 0
+        var ay = aheadStart
+        while (ay <= aheadEnd) {
+            var ax = xStart
+            while (ax < xEnd) {
+                val ap = bitmap.getPixel(ax, ay)
+                if (Color.red(ap) <= config.blackThreshold &&
+                    Color.green(ap) <= config.blackThreshold &&
+                    Color.blue(ap) <= config.blackThreshold
+                ) {
+                    aheadBlack++
+                }
+                aheadTotal++
+                ax += stepX
+            }
+            ay += stepY
+        }
+        val blackAhead = if (aheadTotal > 0) aheadBlack.toFloat() / aheadTotal else 0f
 
         // --- 2. Full-screen color stats for state detection ---
         val sampleStep = 12
@@ -160,7 +215,9 @@ class ScreenAnalyzer(private var config: AppConfig) {
             isWinScreen = isWinScreen,
             isPopup = isPopup,
             isGameplay = isGameplay,
-            isLoading = isLoading
+            isLoading = isLoading,
+            blackAhead = blackAhead,
+            isFire = fireMode
         )
     }
 
@@ -168,14 +225,15 @@ class ScreenAnalyzer(private var config: AppConfig) {
      * Quick check only for danger (used during active hold for speed).
      */
     fun isDangerous(bitmap: Bitmap): Boolean {
+        if (isFireMode(bitmap)) return false
         val w = bitmap.width
         val h = bitmap.height
         val bandY = ((config.detectionLinePercent / 100f) * h).toInt().coerceIn(0, h - 1)
         val bandH = config.bandHeightPx.coerceIn(10, h / 3)
         val yStart = (bandY - bandH / 2).coerceAtLeast(0)
         val yEnd = (bandY + bandH / 2).coerceAtMost(h - 1)
-        val xStart = (w * 0.2f).toInt()
-        val xEnd = (w * 0.8f).toInt()
+        val xStart = (w * CENTER_START).toInt()
+        val xEnd = (w * CENTER_END).toInt()
 
         var black = 0
         var total = 0
