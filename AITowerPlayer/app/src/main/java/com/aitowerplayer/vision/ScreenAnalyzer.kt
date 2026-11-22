@@ -82,7 +82,8 @@ class ScreenAnalyzer(private var config: AppConfig) {
 
         // --- 1. Danger band analysis ---
         val bandY = ((config.detectionLinePercent / 100f) * h).toInt().coerceIn(0, h - 1)
-        val bandH = config.bandHeightPx.coerceIn(10, h / 3)
+        // Band minimal 8% tinggi layar: menutup beberapa lapisan tepat di bawah bola (bukan 1 garis tipis)
+        val bandH = maxOf(config.bandHeightPx, (h * 0.08f).toInt()).coerceIn(10, h / 3)
         val yStart = (bandY - bandH / 2).coerceAtLeast(0)
         val yEnd = (bandY + bandH / 2).coerceAtMost(h - 1)
 
@@ -241,7 +242,8 @@ class ScreenAnalyzer(private var config: AppConfig) {
         val w = bitmap.width
         val h = bitmap.height
         val bandY = ((config.detectionLinePercent / 100f) * h).toInt().coerceIn(0, h - 1)
-        val bandH = config.bandHeightPx.coerceIn(10, h / 3)
+        // Band minimal 8% tinggi layar: menutup beberapa lapisan tepat di bawah bola (bukan 1 garis tipis)
+        val bandH = maxOf(config.bandHeightPx, (h * 0.08f).toInt()).coerceIn(10, h / 3)
         val yStart = (bandY - bandH / 2).coerceAtLeast(0)
         val yEnd = (bandY + bandH / 2).coerceAtMost(h - 1)
         val xStart = (w * CENTER_START).toInt()
