@@ -20,25 +20,37 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: gradle
 
-      # SDK Android sudah terpasang di ubuntu-latest, jadi tidak perlu
-      # android-actions/setup-android. Cukup terima lisensinya.
       - name: Accept Android SDK licenses
         run: |
           mkdir -p "$ANDROID_HOME/licenses"
           echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_HOME/licenses/android-sdk-license"
           echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
 
+      # Cari otomatis folder project (tempat gradlew berada)
+      - name: Locate project folder
+        run: |
+          GRADLEW=$(find . -name gradlew -type f | head -n 1)
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: file gradlew tidak ditemukan di repo. Isi repo:"
+            ls -R | head -50
+            exit 1
+          fi
+          DIR=$(dirname "$GRADLEW")
+          echo "Project ditemukan di: $DIR"
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+
       - name: Grant execute permission for gradlew
+        working-directory: ${{ env.PROJECT_DIR }}
         run: chmod +x gradlew
 
       - name: Build Debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
         run: ./gradlew assembleDebug --stacktrace
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
