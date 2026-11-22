@@ -24,7 +24,12 @@ class TowerAccessibilityService : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var currentStroke: GestureDescription.StrokeDescription? = null
+    @Volatile
     private var isHolding = false
+    private var chainBusy = false
+    private var holdX = 0f
+    private var holdY = 0f
+    private val chunkMs = 60L
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -68,47 +73,74 @@ class TowerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Start a continuous hold (long press that stays down until releaseHold is called).
-     * Uses continuing strokes to keep the finger down.
+     * Tahan sentuhan terus-menerus. Jari tetap "satu sentuhan" lewat continueStroke,
+     * dipecah potongan pendek (60ms) supaya bisa diangkat cepat saat releaseHold().
      */
     fun startHold(x: Float, y: Float) {
         if (isHolding) return
+        holdX = x
+        holdY = y
         isHolding = true
-        continueHold(x, y)
+        handler.post {
+            if (isHolding && !chainBusy) sendChunk()
+        }
     }
 
-    private fun continueHold(x: Float, y: Float) {
-        if (!isHolding) return
-        val path = Path().apply { moveTo(x, y) }
-        // Keep stroke relatively short and chain them so we can cancel quickly
-        val stroke = GestureDescription.StrokeDescription(path, 0, 300L, true)
-        currentStroke = stroke
+    private fun retryChunk() {
+        handler.postDelayed({
+            if (isHolding && !chainBusy) sendChunk()
+        }, 25)
+    }
+
+    private fun sendChunk() {
+        val keepDown = isHolding
+        val prev = currentStroke
+        if (!keepDown && prev == null) return
+
+        val path = Path().apply { moveTo(holdX, holdY) }
+        val stroke = try {
+            if (prev == null) {
+                GestureDescription.StrokeDescription(path, 0, chunkMs, true)
+            } else {
+                prev.continueStroke(path, 0, if (keepDown) chunkMs else 20L, keepDown)
+            }
+        } catch (e: Exception) {
+            currentStroke = null
+            if (isHolding) retryChunk()
+            return
+        }
+
+        currentStroke = if (keepDown) stroke else null
+        chainBusy = true
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        dispatchGesture(gesture, object : GestureResultCallback() {
+        val ok = dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
-                if (isHolding) {
-                    // Continue the hold with willContinue=true chain
-                    continueHold(x, y)
-                }
+                chainBusy = false
+                // Masih menahan -> lanjut. Sudah diminta lepas -> kirim potongan terakhir (jari naik).
+                if (isHolding || currentStroke != null) sendChunk()
             }
 
             override fun onCancelled(gestureDescription: GestureDescription?) {
-                // If cancelled while we still want to hold, try again
-                if (isHolding) {
-                    handler.postDelayed({ continueHold(x, y) }, 30)
-                }
+                chainBusy = false
+                currentStroke = null
+                if (isHolding) retryChunk()
             }
-        }, null)
+        }, handler)
+        if (!ok) {
+            chainBusy = false
+            currentStroke = null
+            if (isHolding) retryChunk()
+        }
     }
 
     /**
-     * Release any ongoing hold immediately.
+     * Lepas sentuhan. Jari benar-benar diangkat paling lama sekitar 60-80ms.
      */
     fun releaseHold() {
         isHolding = false
-        currentStroke = null
-        // Dispatch a tiny cancel gesture to force finger up
-        // (system will cancel ongoing willContinue stroke when we stop chaining)
+        handler.post {
+            if (!chainBusy && currentStroke != null) sendChunk()
+        }
     }
 
     fun isCurrentlyHolding(): Boolean = isHolding
