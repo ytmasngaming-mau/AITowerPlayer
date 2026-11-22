@@ -214,7 +214,28 @@ class ScreenAnalyzer(private var config: AppConfig) {
         val isWinScreen = purpleRatio > 0.12f && goldRatio > 0.04f && (redRatio > 0.01f || brightRatio > 0.05f)
 
         // Popup: cream card + some gold/orange button area, darker surroundings
-        val isPopup = creamRatio > 0.06f && goldRatio > 0.02f && !isWinScreen
+        // Kartu krem di tengah layar (popup game over "Smashed by the curse" / layar hadiah)
+        var cardCream = 0
+        var cardTotal = 0
+        var cy = (h * 0.38f).toInt()
+        val cyEnd = (h * 0.55f).toInt()
+        while (cy < cyEnd) {
+            var cx = (w * 0.2f).toInt()
+            val cxEnd = (w * 0.8f).toInt()
+            while (cx < cxEnd) {
+                val cp = bitmap.getPixel(cx, cy)
+                val cr = Color.red(cp)
+                val cg = Color.green(cp)
+                val cb = Color.blue(cp)
+                if (cr > 215 && cg > 185 && cb > 130 && cb < 225 && cr > cb + 20) cardCream++
+                cardTotal++
+                cx += 10
+            }
+            cy += 10
+        }
+        val creamCard = cardTotal > 0 && (cardCream.toFloat() / cardTotal) > 0.30f
+
+        val isPopup = (creamRatio > 0.06f && goldRatio > 0.02f && !isWinScreen) || (creamCard && !isWinScreen)
 
         // Gameplay: significant blue tower + not win/popup
         val isGameplay = blueRatio > 0.08f && !isWinScreen && !isPopup
