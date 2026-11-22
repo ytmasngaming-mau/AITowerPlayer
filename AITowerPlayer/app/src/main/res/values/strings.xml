@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AI Tower Player</string>
+    <string name="accessibility_service_description">AI Tower Player membutuhkan Accessibility Service untuk melakukan sentuhan otomatis pada game Tower Smash. Service ini hanya digunakan untuk kontrol gesture (tap &amp; hold) dan tidak mengumpulkan data pribadi.</string>
+    <string name="start_ai">START AI</string>
+    <string name="stop_ai">STOP</string>
+    <string name="status_accessibility">Accessibility Service</string>
+    <string name="status_screen_capture">Screen Capture</string>
+    <string name="status_ai">AI Engine</string>
+    <string name="settings">Pengaturan</string>
+    <string name="task_manager">Task Manager</string>
+    <string name="enable_accessibility">Aktifkan Accessibility</string>
+    <string name="request_screen_capture">Minta Izin Screen Capture</string>
+    <string name="levels_completed">Level Selesai</string>
+    <string name="wins">Kemenangan</string>
+    <string name="fails">Kegagalan</string>
+    <string name="activity_log">Log Aktivitas</string>
+    <string name="floating_control">Kontrol Mengambang</string>
+    <string name="detection_sensitivity">Sensitivitas Deteksi</string>
+    <string name="detection_line">Garis Deteksi (Y %)</string>
+    <string name="analysis_fps">FPS Analisis</string>
+    <string name="animation_wait">Tunggu Animasi (ms)</string>
+    <string name="touch_hold_ms">Durasi Tahan (ms)</string>
+    <string name="auto_level">Auto Level</string>
+    <string name="black_threshold">Ambang Hitam</string>
+    <string name="pixel_threshold">Ambang Piksel (%)</string>
+    <string name="save">Simpan</string>
+    <string name="add_task">Tambah Task</string>
+    <string name="edit_task">Edit Task</string>
+    <string name="delete_task">Hapus</string>
+    <string name="task_name">Nama Task</string>
+    <string name="coord_x">Koordinat X</string>
+    <string name="coord_y">Koordinat Y</string>
+    <string name="delay_ms">Delay (ms)</string>
+    <string name="enabled">Aktif</string>
+    <string name="order">Urutan</string>
+    <string name="notification_channel_name">AI Tower Player</string>
+    <string name="notification_channel_desc">Notifikasi status AI</string>
+    <string name="notification_running">AI sedang berjalan…</string>
+    <string name="notification_stopped">AI dihentikan</string>
+</resources>
