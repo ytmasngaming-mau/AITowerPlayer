@@ -1,5 +1,6 @@
 package com.aitowerplayer.service
 
+import kotlin.random.Random
 import android.app.Activity
 import android.app.Notification
 import android.app.PendingIntent
@@ -74,6 +75,8 @@ class ScreenCaptureService : Service() {
     private var lastTouchX = 0f
     private var lastTouchY = 0f
     private var holdStartTime = 0L
+    private var safeStreak = 0
+    private var lastFire = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -253,17 +256,33 @@ class ScreenCaptureService : Service() {
                     return
                 }
 
-                // Danger / safe logic
-                if (result.isDanger) {
+                // Mode api (tower emas): hitam boleh dihancurkan
+                if (result.isFire != lastFire) {
+                    lastFire = result.isFire
+                    LogManager.log(if (lastFire) "MODE API aktif - hajar semuanya" else "Mode api selesai")
+                }
+
+                // Lookahead: kalau lapisan berikutnya hitam pekat, lepas lebih awal
+                val aheadLimit = ((config.pixelThresholdPercent / 100f) * 2f).coerceAtMost(0.9f)
+                val aheadDanger = isHoldingTouch && !result.isFire && result.blackAhead >= aheadLimit
+
+                if (result.isDanger || aheadDanger) {
+                    // Lepas secepat mungkin
+                    safeStreak = 0
                     if (isHoldingTouch) {
                         releaseTouch()
-                        setState(GameState.RELEASING, "Bahaya! Lepas sentuhan (black=${"%.0f".format(result.blackRatio * 100)}%)")
+                        setState(
+                            GameState.RELEASING,
+                            "Ada hitam - lepas (bawah=${"%.0f".format(result.blackRatio * 100)}% depan=${"%.0f".format(result.blackAhead * 100)}%)"
+                        )
                     }
                 } else {
-                    // Safe zone – hold
-                    if (!isHoldingTouch && (result.isGameplay || !result.isLoading)) {
+                    // Aman: tekan lagi setelah 2 frame aman berturut-turut + jeda kecil ala manusia
+                    safeStreak++
+                    if (!isHoldingTouch && safeStreak >= 2 && (result.isGameplay || !result.isLoading)) {
+                        delay(Random.nextLong(20L, 70L))
                         startTouch()
-                        setState(GameState.HOLDING, "Area aman – tahan (black=${"%.0f".format(result.blackRatio * 100)}%)")
+                        setState(GameState.HOLDING, "Area aman - tahan (black=${"%.0f".format(result.blackRatio * 100)}%)")
                     }
                     // Safety: max hold duration
                     if (isHoldingTouch && System.currentTimeMillis() - holdStartTime > config.maxHoldMs) {
@@ -301,8 +320,11 @@ class ScreenCaptureService : Service() {
             return
         }
         val config = ConfigManager.config
-        lastTouchX = screenWidth * (config.touchXPercent / 100f)
-        lastTouchY = screenHeight * (config.touchYPercent / 100f)
+        // Posisi sentuhan sedikit acak supaya terasa seperti jari manusia
+        lastTouchX = (screenWidth * (config.touchXPercent / 100f) + Random.nextInt(-25, 26))
+            .coerceIn(1f, (screenWidth - 1).toFloat())
+        lastTouchY = (screenHeight * (config.touchYPercent / 100f) + Random.nextInt(-40, 41))
+            .coerceIn(1f, (screenHeight - 1).toFloat())
         acc.startHold(lastTouchX, lastTouchY)
         isHoldingTouch = true
         holdStartTime = System.currentTimeMillis()
