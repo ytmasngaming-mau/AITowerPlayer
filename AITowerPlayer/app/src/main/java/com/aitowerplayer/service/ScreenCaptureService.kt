@@ -76,6 +76,7 @@ class ScreenCaptureService : Service() {
     private var lastTouchY = 0f
     private var holdStartTime = 0L
     private var safeStreak = 0
+    private var lastHoldAt = System.currentTimeMillis()
     private var lastFire = false
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -262,9 +263,12 @@ class ScreenCaptureService : Service() {
                     LogManager.log(if (lastFire) "MODE API aktif - hajar semuanya" else "Mode api selesai")
                 }
 
-                // Lookahead: kalau lapisan berikutnya hitam pekat, lepas lebih awal
+                // Lookahead: kalau lapisan berikutnya hitam, jangan mulai menekan dan lepas lebih awal
                 val aheadLimit = ((config.pixelThresholdPercent / 100f) * 2f).coerceAtMost(0.9f)
-                val aheadDanger = isHoldingTouch && !result.isFire && result.blackAhead >= aheadLimit
+                if (isHoldingTouch) lastHoldAt = System.currentTimeMillis()
+                // Kalau sudah >6 detik tidak menekan, abaikan lookahead supaya tidak macet semalaman
+                val patient = System.currentTimeMillis() - lastHoldAt < 6000L
+                val aheadDanger = patient && !result.isFire && result.blackAhead >= aheadLimit
 
                 if (result.isDanger || aheadDanger) {
                     // Lepas secepat mungkin
@@ -355,55 +359,57 @@ class ScreenCaptureService : Service() {
             performTap(screenWidth / 2f, screenHeight * 0.78f)
         }
 
-        // Wait and check for popup
-        delay(1500)
-        setState(GameState.LOADING, "Menunggu popup / level baru…")
-        // Give a few frames for popup detection in next loop iterations
-        var waited = 0
-        while (waited < 4000 && isRunning) {
-            delay(300)
-            waited += 300
-            val bmp = captureFrame()
-            if (bmp != null) {
-                val r = analyzer.analyze(bmp)
-                bmp.recycle()
-                if (r.isPopup) {
-                    setState(GameState.POPUP_DETECTED, "Popup terdeteksi setelah Level")
-                    delay(500)
-                    handlePopup()
-                    return
-                }
-                if (r.isGameplay) {
-                    setState(GameState.GAMEPLAY, "Level baru dimulai")
-                    return
-                }
-            }
-        }
-        // Fallback: assume gameplay
-        setState(GameState.GAMEPLAY, "Lanjut gameplay (timeout)")
+        // Lanjutkan melewati layar hadiah / Collect / restart sampai gameplay lagi
+        delay(1200)
+        advanceScreens()
     }
 
     private suspend fun handlePopup() {
-        setState(GameState.CLICKING_SMASH, "Menekan SMASH!")
-        val tasks = ConfigManager.tasks
-            .filter { it.enabled && it.trigger == "AFTER_POPUP" }
-            .sortedBy { it.order }
+        setState(GameState.CLICKING_SMASH, "Popup terdeteksi - lanjutkan")
+        advanceScreens()
+    }
 
-        if (tasks.isNotEmpty()) {
-            for (task in tasks) {
-                delay(task.delayMs)
-                val (px, py) = resolveTaskPoint(task)
-                performTap(px, py)
-                LogManager.log("Task [${task.name}] diklik di (${px.toInt()},${py.toInt()}) percent=${task.usePercent}")
+    /**
+     * Loop pemulih untuk semalaman: selama bukan layar gameplay, ketuk tombol yang diketahui
+     * secara bergantian (Restart tower, Level, SMASH), dan berhenti kalau gameplay sudah stabil.
+     * Tombol hadiah / Collect / iklan sengaja tidak diketuk.
+     */
+    private suspend fun advanceScreens() {
+        setState(GameState.LOADING, "Melewati layar hadiah / restart...")
+        val names = listOf("Restart tower", "Level", "SMASH")
+        val ys = listOf(58f, 81f, 52f)
+        var gameplayStreak = 0
+        var idx = 0
+        val startMs = System.currentTimeMillis()
+        while (isRunning && System.currentTimeMillis() - startMs < 60000L) {
+            val bmp = captureFrame()
+            if (bmp == null) {
+                delay(300)
+                continue
             }
-        } else {
-            // Default sesuai screenshot: SMASH di tengah popup ~52% tinggi
-            delay(600)
-            performTap(screenWidth / 2f, screenHeight * 0.52f)
+            val r = analyzer.analyze(bmp)
+            bmp.recycle()
+            if (r.isGameplay && !r.isWinScreen && !r.isPopup) {
+                gameplayStreak++
+                if (gameplayStreak >= 3) {
+                    safeStreak = 0
+                    lastHoldAt = System.currentTimeMillis()
+                    setState(GameState.GAMEPLAY, "Gameplay dimulai lagi")
+                    return
+                }
+                delay(300)
+                continue
+            }
+            gameplayStreak = 0
+            val i = idx % names.size
+            idx++
+            performTap(screenWidth / 2f, screenHeight * (ys[i] / 100f))
+            LogManager.log("Lanjut layar: tap ${names[i]} (50%, ${ys[i].toInt()}%)")
+            delay(1300)
         }
-
-        delay(1200)
-        setState(GameState.GAMEPLAY, "Kembali bermain setelah SMASH")
+        safeStreak = 0
+        lastHoldAt = System.currentTimeMillis()
+        setState(GameState.GAMEPLAY, "Timeout lanjut layar - coba main lagi")
     }
 
     /**
