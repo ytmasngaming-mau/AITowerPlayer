@@ -61,6 +61,18 @@ class ScreenAnalyzer(private var config: AppConfig) {
         return total > 0 && (gold.toFloat() / total) >= FIRE_GOLD_RATIO
     }
 
+    data class AnalysisResult(
+        val isDanger: Boolean,
+        val blackRatio: Float,
+        val isWinScreen: Boolean,
+        val isPopup: Boolean,
+        val isGameplay: Boolean,
+        val isLoading: Boolean,
+        val dominantHue: Float = 0f,
+        val blackAhead: Float = 0f,
+        val isFire: Boolean = false
+    )
+
     fun analyze(bitmap: Bitmap): AnalysisResult {
         val w = bitmap.width
         val h = bitmap.height
