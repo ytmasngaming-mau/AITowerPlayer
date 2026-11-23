@@ -77,6 +77,11 @@ class ScreenCaptureService : Service() {
     private var holdStartTime = 0L
     private var safeStreak = 0
     private var lastHoldAt = System.currentTimeMillis()
+    private var lastStepAt = 0L
+    // MODE LANGKAH: lama satu ketukan (ms) dan jeda tunggu setelahnya sebelum cek lagi (ms).
+    // Kalau 1 ketukan menghancurkan >1 lapisan: kecilkan stepTapMs (mis. 60). Kalau 0 lapisan: besarkan (mis. 110).
+    private val stepTapMs = 80L
+    private val stepSettleMs = 230L
     private var lastFire = false
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -190,6 +195,7 @@ class ScreenCaptureService : Service() {
             setState(GameState.GAMEPLAY, "Gameplay dimulai")
 
             while (isActive && isRunning) {
+                val loopStart = System.currentTimeMillis()
                 try {
                     val bitmap = captureFrame()
                     if (bitmap != null) {
@@ -199,7 +205,8 @@ class ScreenCaptureService : Service() {
                 } catch (e: Exception) {
                     LogManager.log("Error frame: ${e.message}")
                 }
-                delay(frameInterval)
+                // Kurangi waktu proses dari jeda, supaya reaksi secepat mungkin
+                delay((frameInterval - (System.currentTimeMillis() - loopStart)).coerceAtLeast(1L))
             }
         }
     }
@@ -263,35 +270,43 @@ class ScreenCaptureService : Service() {
                     LogManager.log(if (lastFire) "MODE API aktif - hajar semuanya" else "Mode api selesai")
                 }
 
-                // Lookahead: kalau lapisan berikutnya hitam, jangan mulai menekan dan lepas lebih awal
-                val aheadLimit = ((config.pixelThresholdPercent / 100f) * 2f).coerceAtMost(0.9f)
-                if (isHoldingTouch) lastHoldAt = System.currentTimeMillis()
-                // Kalau sudah >6 detik tidak menekan, abaikan lookahead supaya tidak macet semalaman
-                val patient = System.currentTimeMillis() - lastHoldAt < 6000L
-                val aheadDanger = patient && !result.isFire && result.blackAhead >= aheadLimit
-
-                if (result.isDanger || aheadDanger) {
-                    // Lepas secepat mungkin
+                // MODE LANGKAH: satu ketukan pendek = satu lapisan, lalu berhenti dan cek lagi.
+                // Hanya saat mode api (tower emas) jari ditahan terus karena hitam boleh dihancurkan.
+                val now = System.currentTimeMillis()
+                if (result.isDanger) {
+                    // Ada hitam di lapisan dekat bola: jangan ketuk, tunggu hitamnya bergeser
                     safeStreak = 0
                     if (isHoldingTouch) {
                         releaseTouch()
                         setState(
                             GameState.RELEASING,
-                            "Ada hitam - lepas (bawah=${"%.0f".format(result.blackRatio * 100)}% depan=${"%.0f".format(result.blackAhead * 100)}%)"
+                            "Ada hitam dekat - lepas (bawah=${"%.0f".format(result.blackRatio * 100)}%)"
                         )
                     }
                 } else {
-                    // Aman: tekan lagi setelah 2 frame aman berturut-turut + jeda kecil ala manusia
                     safeStreak++
-                    if (!isHoldingTouch && safeStreak >= 2 && (result.isGameplay || !result.isLoading)) {
-                        delay(Random.nextLong(20L, 70L))
-                        startTouch()
-                        setState(GameState.HOLDING, "Area aman - tahan (black=${"%.0f".format(result.blackRatio * 100)}%)")
-                    }
-                    // Safety: max hold duration
-                    if (isHoldingTouch && System.currentTimeMillis() - holdStartTime > config.maxHoldMs) {
+                    if (result.isFire) {
+                        if (!isHoldingTouch) {
+                            startTouch()
+                            setState(GameState.HOLDING, "Mode api - tahan")
+                        } else if (now - holdStartTime > config.maxHoldMs) {
+                            releaseTouch()
+                        }
+                    } else if (isHoldingTouch) {
+                        // Sisa dari mode api: lepas dulu
                         releaseTouch()
-                        LogManager.log("Max hold tercapai, lepas otomatis.")
+                        safeStreak = 0
+                        lastStepAt = now
+                    } else if (safeStreak >= 2 && now - lastStepAt >= stepSettleMs &&
+                        (result.isGameplay || !result.isLoading)
+                    ) {
+                        delay(Random.nextLong(15L, 40L))
+                        stepTap()
+                        safeStreak = 0
+                        setState(
+                            GameState.HOLDING,
+                            "Langkah: hancurkan 1 lapisan (black=${"%.0f".format(result.blackRatio * 100)}%)"
+                        )
                     }
                 }
             }
@@ -316,6 +331,21 @@ class ScreenCaptureService : Service() {
 
             else -> {}
         }
+    }
+
+    /** Satu ketukan pendek (menghancurkan sekitar satu lapisan). */
+    private fun stepTap() {
+        val acc = TowerAccessibilityService.instance ?: run {
+            LogManager.log("Accessibility tidak aktif!")
+            return
+        }
+        val config = ConfigManager.config
+        val x = (screenWidth * (config.touchXPercent / 100f) + Random.nextInt(-25, 26))
+            .coerceIn(1f, (screenWidth - 1).toFloat())
+        val y = (screenHeight * (config.touchYPercent / 100f) + Random.nextInt(-40, 41))
+            .coerceIn(1f, (screenHeight - 1).toFloat())
+        acc.tap(x, y, stepTapMs)
+        lastStepAt = System.currentTimeMillis()
     }
 
     private fun startTouch() {
